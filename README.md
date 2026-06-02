@@ -5,6 +5,11 @@ An open-source Character.AI alternative — an interactive, high-fidelity AI com
 ![Open Character AI Screenshot](https://cdn.muapi.ai/data/2/566606463946/Screenshot_2026-05-19_174317.png)
 
 
+## Related Projects
+
+- [Open-Pomelli](https://github.com/SamurAIGPT/Open-Pomelli) — Open-source Pomelli alternative — self-hosted AI assistant platform
+- [Open-Poe-AI](https://github.com/Anil-matcha/Open-Poe-AI) — Open-source Poe alternative — chat with multiple LLMs from one interface
+
 ## 🚀 Features
 
 - **Futuristic Glassmorphic UI**: Premium dark mode design featuring interactive message bubbles, typing indicators, and LLM tuning sliders.
