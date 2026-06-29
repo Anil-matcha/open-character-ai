@@ -10,6 +10,8 @@
 
 > 🎨 **[Explore 50+ more open-source AI apps →](https://github.com/Anil-matcha/awesome-generative-ai-apps)**
 
+https://github.com/user-attachments/assets/b6e252c0-6e06-4333-bc53-5d6856811868
+
 ## 🌐 Project Details
 
 **GitHub Repository:** [github.com/Anil-matcha/open-character-ai](https://github.com/Anil-matcha/open-character-ai)
