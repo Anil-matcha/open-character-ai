@@ -29,7 +29,7 @@ export default function Pricing() {
     try {
       const { data } = await axios.post("/api/checkout", { planId });
       if (data.url) {
-        window.location.href = data.url;
+        window.location.assign(data.url);
       } else {
         throw new Error("No redirection URL returned");
       }

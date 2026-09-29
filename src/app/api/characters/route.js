@@ -470,7 +470,21 @@ export async function POST(req) {
     const userId = session?.user?.id || null;
 
     const body = await req.json();
-    const { name, avatar, profile_url, description, personality, systemPrompt, greeting, is_public } = body;
+    const {
+      name,
+      avatar,
+      profile_url,
+      description,
+      personality,
+      systemPrompt,
+      greeting,
+      scenario = "",
+      exampleDialogue = "",
+      alternateGreetings = [],
+      tags = [],
+      creatorNotes = "",
+      is_public,
+    } = body;
 
     if (
       !name ||
@@ -495,6 +509,11 @@ export async function POST(req) {
         personality,
         systemPrompt,
         greeting,
+        scenario: scenario || "",
+        exampleDialogue: exampleDialogue || "",
+        alternateGreetings: typeof alternateGreetings === "string" ? alternateGreetings : JSON.stringify(alternateGreetings),
+        tags: typeof tags === "string" ? tags : JSON.stringify(tags),
+        creatorNotes: creatorNotes || "",
         isCustom: true,
         isPublic: typeof is_public === "boolean" ? is_public : true,
         userId: userId,

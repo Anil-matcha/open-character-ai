@@ -24,11 +24,10 @@ export default function Navbar() {
 
   const isApiKeyActive = Boolean(session?.user?.customApiKey);
 
-  useEffect(() => {
-    if (session?.user?.customApiKey) {
-      setApiKeyInput(session.user.customApiKey);
-    }
-  }, [session?.user?.customApiKey]);
+  const handleOpenApiKeyModal = () => {
+    setApiKeyInput(session?.user?.customApiKey || "");
+    setIsApiKeyModalOpen(true);
+  };
 
   const appMatch = pathname ? pathname.match(/^\/app\/([^\/]+)/) : null;
   const currentAppId = appMatch ? appMatch[1] : null;
@@ -156,7 +155,7 @@ export default function Navbar() {
 
           {/* Add/Manage API Key - Directly visible in Navbar */}
           <button
-            onClick={() => setIsApiKeyModalOpen(true)}
+            onClick={handleOpenApiKeyModal}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold border transition-all cursor-pointer ${
               isApiKeyActive
                 ? "bg-amber-500/10 border-amber-500/30 text-amber-400 hover:bg-amber-500/20"
@@ -210,7 +209,7 @@ export default function Navbar() {
                       {session.user.email}
                     </div>
                     <button
-                      onClick={() => setIsApiKeyModalOpen(true)}
+                      onClick={handleOpenApiKeyModal}
                       className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-xs font-semibold text-primary-text hover:bg-primary/10 transition-colors"
                     >
                       <FiKey size={14} className="text-amber-400" />

@@ -1,262 +1,326 @@
 import { NextResponse } from "next/server";
-import { getServerSession } from "next-auth/next";
-import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-
-// Utility sleep helper
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+import { getAuthenticatedUser, getOwnedChat } from "@/lib/auth-helpers";
+import { assemblePrompt, findMatchingLoreEntries } from "@/lib/prompt-builder";
+import { getActiveLoreEntriesForChat } from "@/lib/lorebook";
+import { GenerationService } from "@/lib/services/generation";
 
 export async function GET(req, { params }) {
   try {
-    const session = await getServerSession(authOptions);
-    if (!session?.user?.id) {
+    const user = await getAuthenticatedUser();
+    if (!user) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     const { id } = await params;
 
+    // Secure owner authorization check
+    const chat = await getOwnedChat(user.id, id);
+    if (!chat) {
+      return NextResponse.json({ error: "Chat thread not found or access denied" }, { status: 404 });
+    }
+
     let messages = await prisma.message.findMany({
       where: { chatId: id },
       orderBy: { createdAt: "asc" },
+      include: {
+        swipes: {
+          orderBy: { index: "asc" },
+        },
+      },
     });
 
-    // If chat room is blank, seed the character's customized greeting message
+    // If chat thread is blank, seed the character greeting and initial swipe
     if (messages.length === 0) {
-      const chat = await prisma.chat.findUnique({
-        where: { id },
-        include: { character: true },
-      });
-
-      if (!chat) {
-        return NextResponse.json({ error: "Chat thread not found" }, { status: 404 });
-      }
+      const greetingContent = chat.character.greeting || "Hello!";
 
       const greetingMessage = await prisma.message.create({
         data: {
           chatId: id,
           role: "assistant",
-          content: chat.character.greeting,
+          speaker: chat.character.name,
+          content: greetingContent,
+          swipes: {
+            create: {
+              index: 0,
+              content: greetingContent,
+              selected: true,
+            },
+          },
+        },
+        include: {
+          swipes: true,
         },
       });
 
       messages = [greetingMessage];
     }
 
-    return NextResponse.json({ messages });
+    // Parse persisted settings if any
+    let settings = null;
+    if (chat.settings) {
+      try {
+        settings = JSON.parse(chat.settings);
+      } catch {}
+    }
+
+    return NextResponse.json({
+      messages,
+      chat: {
+        id: chat.id,
+        title: chat.title,
+        settings,
+        scenarioOverride: chat.scenarioOverride,
+        character: chat.character,
+      },
+    });
   } catch (error) {
-    console.error("[MESSAGES_GET_ERROR]", error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    console.error("[MESSAGES_GET_ERROR]", error.message);
+    return NextResponse.json({ error: "Failed to load chat messages" }, { status: 500 });
   }
 }
 
 export async function POST(req, { params }) {
-  let cost = 2;
-  let creditsDeducted = false;
-  let userId = null;
-
   try {
-    const session = await getServerSession(authOptions);
-    if (!session?.user?.id) {
+    const user = await getAuthenticatedUser();
+    if (!user) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
-    userId = session.user.id;
 
     const { id } = await params;
-    const body = await req.json();
-    const { content, imageUrl, model = "google/gemini-2.5-flash", temperature = 1.0, maxTokens = 2048, reasoning = false } = body;
-
-    if (!content) {
-      return NextResponse.json({ error: "Message content is required" }, { status: 400 });
-    }
-
-    // Extract custom API key if present
-    const headerApiKey = req.headers.get("x-custom-api-key");
-    const customApiKey = headerApiKey || body.customApiKey || session.user.customApiKey || null;
-    const isUsingCustomKey = Boolean(customApiKey && customApiKey.trim().length > 0);
-
-    cost = isUsingCustomKey ? 0 : 2;
-
-    // 1. Fetch user's credit balance if using site credits
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-    });
-
-    if (!user) {
-      return NextResponse.json({ error: "User profile not found in database" }, { status: 404 });
-    }
-
-    if (!isUsingCustomKey && user.credits < cost) {
-      return NextResponse.json({ error: `Insufficient credits. This requires ${cost} credits but you only have ${user.credits} remaining.` }, { status: 402 });
-    }
-
-    // 2. Fetch the corresponding Character's configured system prompt
-    const chat = await prisma.chat.findUnique({
-      where: { id },
-      include: { character: true },
-    });
-
+    const chat = await getOwnedChat(user.id, id);
     if (!chat) {
-      return NextResponse.json({ error: "Chat thread not found" }, { status: 404 });
+      return NextResponse.json({ error: "Chat thread not found or access denied" }, { status: 404 });
     }
 
-    // Fetch the last 10 messages for conversational context
+    const body = await req.json();
+    const {
+      content,
+      imageUrl,
+      action = "generate", // "generate" | "regenerate" | "swipe" | "continue"
+      targetMessageId = null,
+      model = "google/gemini-2.5-flash",
+      temperature = 1.0,
+      maxTokens = 2048,
+      reasoning = false,
+      scenarioOverride,
+    } = body;
+
+    // Optional scenario override update
+    if (scenarioOverride !== undefined && scenarioOverride !== chat.scenarioOverride) {
+      await prisma.chat.update({
+        where: { id },
+        data: { scenarioOverride },
+      });
+      chat.scenarioOverride = scenarioOverride;
+    }
+
+    // Persist chat generation settings
+    const settingsObj = { model, temperature, maxTokens, reasoning };
+    await prisma.chat.update({
+      where: { id },
+      data: {
+        settings: JSON.stringify(settingsObj),
+        updatedAt: new Date(),
+      },
+    });
+
+    // Check custom API key if present
+    const headerApiKey = req.headers.get("x-custom-api-key");
+    const customApiKey = headerApiKey || body.customApiKey || user.customApiKey || null;
+    const isUsingCustomKey = Boolean(customApiKey && customApiKey.trim().length > 0);
+    const cost = isUsingCustomKey ? 0 : 2;
+
+    let userMessage = null;
+
+    // Handle normal "generate" turn
+    if (action === "generate") {
+      if (!content || !content.trim()) {
+        return NextResponse.json({ error: "Message content is required" }, { status: 400 });
+      }
+
+      // Persist the user turn
+      userMessage = await prisma.message.create({
+        data: {
+          chatId: id,
+          role: "user",
+          speaker: user.name || "User",
+          content: content.trim(),
+          imageUrl: imageUrl || null,
+        },
+      });
+    }
+
+    // Load recent history for prompt assembly
     const previousMessages = await prisma.message.findMany({
       where: { chatId: id },
-      orderBy: { createdAt: 'desc' },
-      take: 10,
-    });
-    
-    // Reverse to chronological order
-    previousMessages.reverse();
-
-    // Format the conversational history
-    let historyBlock = "";
-    if (previousMessages.length > 0) {
-      const formattedHistory = previousMessages.map(m => `${m.role === 'user' ? 'User' : chat.character.name}: ${m.content}`).join("\n\n");
-      historyBlock = `\n\n### RECENT CONVERSATION HISTORY ###\n${formattedHistory}\n\n`;
-    }
-
-    const enhancedSystemPrompt = `${chat.character.systemPrompt}${historyBlock}
-IMPORTANT:
-- Reply to the USER's latest message naturally based on the above recent conversation history.
-- Do not repeat the history.
-- You are roleplaying as ${chat.character.name}. Write your response directly in first-person as ${chat.character.name}.
-- Do NOT start your response with "User: ...", "${chat.character.name}: ...", or similar labels. Just output the dialogue itself.`;
-
-    // 3. Deduct credits first if not using custom key
-    if (!isUsingCustomKey && cost > 0) {
-      await prisma.user.update({
-        where: { id: userId },
-        data: { credits: { decrement: cost } },
-      });
-      creditsDeducted = true;
-    }
-
-    // 4. Save the User's submitted message
-    const userMessage = await prisma.message.create({
-      data: {
-        chatId: id,
-        role: "user",
-        content,
-        imageUrl,
-      },
+      orderBy: { createdAt: "asc" },
     });
 
-    // 5. Connect to MuAPI
-    const apiKey = isUsingCustomKey ? customApiKey.trim() : process.env.MU_API_KEY;
-    if (!apiKey) {
-      throw new Error("API key is missing.");
+    // Separate recent conversation history from the active turn prompt
+    let historyMessages = previousMessages;
+    let inputPrompt = content;
+
+    if (action === "generate") {
+      // Exclude current user turn from system prompt history (it is passed directly as prompt)
+      historyMessages = previousMessages.filter((m) => m.id !== userMessage?.id);
+      inputPrompt = content;
+    } else if (action === "continue") {
+      // Continue continues the last assistant response
+      historyMessages = previousMessages;
+      inputPrompt = "[Please continue your previous response seamlessly.]";
+    } else if (action === "regenerate" || action === "swipe") {
+      // Target assistant message is being replaced / given a new swipe
+      const targetId = targetMessageId || [...previousMessages].reverse().find((m) => m.role === "assistant")?.id;
+      const targetIndex = targetId ? previousMessages.findIndex((m) => m.id === targetId) : -1;
+      const effectiveMessages = targetIndex >= 0 ? previousMessages.slice(0, targetIndex) : previousMessages;
+
+      // Find the preceding user turn to serve as the prompt
+      const lastUserTurn = [...effectiveMessages].reverse().find((m) => m.role === "user");
+      inputPrompt = lastUserTurn ? lastUserTurn.content : "Continue the roleplay.";
+
+      // History includes prior messages up to the user turn
+      historyMessages = lastUserTurn ? effectiveMessages.filter((m) => m.id !== lastUserTurn.id) : effectiveMessages;
     }
 
-    // Select endpoint depending on whether an image was attached or not
-    const isVision = !!imageUrl;
-    const apiUrl = isVision 
-      ? "https://api.muapi.ai/api/v1/openrouter-vision" 
-      : "https://api.muapi.ai/api/v1/any-llm-models";
+    // Resolve lorebook entries
+    const availableLore = await getActiveLoreEntriesForChat(user.id, chat.characterId);
+    const recentText = previousMessages.slice(-5).map((m) => m.content).join(" ");
+    const activeLoreEntries = findMatchingLoreEntries(recentText, availableLore);
 
-    const payload = {
-      prompt: content,
-      system_prompt: enhancedSystemPrompt,
+    // Assemble modular prompt with last 10 messages of conversation history in system prompt
+    const { systemPrompt } = assemblePrompt({
+      character: chat.character,
+      chat,
+      messages: historyMessages,
+      activeLoreEntries,
+      storySummary: chat.storySummary,
+      historyCount: 10,
+    });
+
+    // Execute generation via durable GenerationService
+    const generationResult = await GenerationService.run({
+      chatId: id,
+      userId: user.id,
+      action,
+      targetMessageId,
       model,
-      temperature: parseFloat(temperature),
-      max_tokens: parseInt(maxTokens),
-      reasoning: !!reasoning,
-    };
-
-    if (isVision) {
-      payload.images_list = [imageUrl];
-    }
-
-    const response = await fetch(apiUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-      },
-      body: JSON.stringify(payload),
+      temperature,
+      maxTokens,
+      reasoning,
+      systemPrompt,
+      prompt: inputPrompt,
+      imageUrl: action === "generate" ? imageUrl : null,
+      cost,
+      customApiKey,
     });
 
-    if (!response.ok) {
-      const errText = await response.text();
-      console.error("[MUAPI_LLM_ERROR]", errText);
-      throw new Error(`Upstream API error: ${response.statusText}`);
-    }
+    let assistantMessage = null;
 
-    const data = await response.json();
-    const requestId = data.request_id;
+    if (action === "swipe" && targetMessageId) {
+      // Add a new swipe alternative to existing assistant message
+      const existingMessage = await prisma.message.findUnique({
+        where: { id: targetMessageId },
+        include: { swipes: true },
+      });
 
-    if (!requestId) {
-      throw new Error("Did not receive a request_id from upstream server.");
-    }
+      if (!existingMessage) {
+        return NextResponse.json({ error: "Target message for swipe not found" }, { status: 404 });
+      }
 
-    // 6. Synchronous server-side polling loop to retrieve results
-    let completedText = "";
-    let status = "processing";
-    const tickDelay = 1500;
+      const nextIndex = existingMessage.swipes.length;
+      // Mark earlier swipes as unselected
+      await prisma.messageSwipe.updateMany({
+        where: { messageId: targetMessageId },
+        data: { selected: false },
+      });
 
-    while (status === "processing") {
-      await delay(tickDelay);
-
-      const checkRes = await fetch(`https://api.muapi.ai/api/v1/predictions/${requestId}/result`, {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": apiKey,
+      const newSwipe = await prisma.messageSwipe.create({
+        data: {
+          messageId: targetMessageId,
+          index: nextIndex,
+          content: generationResult.text,
+          generationRunId: generationResult.generationRunId,
+          selected: true,
         },
       });
 
-      if (checkRes.ok) {
-        const checkData = await checkRes.json();
-        status = checkData.status || checkData.state || "processing";
+      // Update message content to match newly selected swipe
+      assistantMessage = await prisma.message.update({
+        where: { id: targetMessageId },
+        data: {
+          content: generationResult.text,
+          editedAt: new Date(),
+        },
+        include: {
+          swipes: { orderBy: { index: "asc" } },
+        },
+      });
+    } else if (action === "regenerate") {
+      // Find the latest assistant message
+      const lastAssistantMessage = [...previousMessages].reverse().find((m) => m.role === "assistant");
+      if (lastAssistantMessage) {
+        const existingSwipes = await prisma.messageSwipe.findMany({
+          where: { messageId: lastAssistantMessage.id },
+        });
 
-        if (status === "completed" || status === "succeeded") {
-          completedText = checkData.outputs?.[0] || 
-                          (typeof checkData.output === "string" ? checkData.output : "") ||
-                          checkData.output?.text ||
-                          checkData.output?.choices?.[0]?.message?.content ||
-                          checkData.response ||
-                          "";
-          status = "completed"; // normalize
-          break;
-        } else if (status === "failed") {
-          throw new Error("Generation task failed on the upstream system.");
-        }
-      } else {
-        console.warn(`[POLL_TICK_ERROR] Status code: ${checkRes.status}`);
+        await prisma.messageSwipe.updateMany({
+          where: { messageId: lastAssistantMessage.id },
+          data: { selected: false },
+        });
+
+        await prisma.messageSwipe.create({
+          data: {
+            messageId: lastAssistantMessage.id,
+            index: existingSwipes.length,
+            content: generationResult.text,
+            generationRunId: generationResult.generationRunId,
+            selected: true,
+          },
+        });
+
+        assistantMessage = await prisma.message.update({
+          where: { id: lastAssistantMessage.id },
+          data: {
+            content: generationResult.text,
+            editedAt: new Date(),
+          },
+          include: {
+            swipes: { orderBy: { index: "asc" } },
+          },
+        });
       }
+    } else {
+      // Normal generate or continue: create new assistant message
+      assistantMessage = await prisma.message.create({
+        data: {
+          chatId: id,
+          role: "assistant",
+          speaker: chat.character.name,
+          content: generationResult.text,
+          swipes: {
+            create: {
+              index: 0,
+              content: generationResult.text,
+              generationRunId: generationResult.generationRunId,
+              selected: true,
+            },
+          },
+        },
+        include: {
+          swipes: true,
+        },
+      });
     }
-
-    // 7. Save and commit assistant response
-    const assistantMessage = await prisma.message.create({
-      data: {
-        chatId: id,
-        role: "assistant",
-        content: completedText || "Hello! How can I help you?",
-      },
-    });
 
     return NextResponse.json({
       userMessage,
       assistantMessage,
-      remainingCredits: isUsingCustomKey ? "∞" : user.credits - cost,
+      remainingCredits: generationResult.remainingCredits,
     });
-
   } catch (error) {
-    console.error("[MESSAGES_POST_ERROR]", error);
-
-    // Auto-refund credits to the user if deduction occurred but completion failed
-    if (creditsDeducted && userId) {
-      try {
-        await prisma.user.update({
-          where: { id: userId },
-          data: { credits: { increment: cost } },
-        });
-        console.log(`[CREDITS_REFUNDED] Refunded ${cost} credits to user ${userId} due to execution error.`);
-      } catch (refundError) {
-        console.error("[REFUND_FATAL_ERROR]", refundError);
-      }
-    }
-
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    console.error("[MESSAGES_POST_ERROR]", error.message);
+    const status = error.statusCode || 500;
+    return NextResponse.json({ error: error.message || "Generation error" }, { status });
   }
 }

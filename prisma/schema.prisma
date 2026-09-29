@@ -7,20 +7,20 @@ generator client {
 }
 
 model Account {
-  id                 String  @id @default(cuid())
-  userId             String
-  type               String
-  provider           String
-  providerAccountId  String
-  refresh_token      String? @db.Text
-  access_token       String? @db.Text
-  expires_at         Int?
-  token_type         String?
-  scope              String?
-  id_token           String? @db.Text
-  session_state      String?
-  user               User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-  
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   @@unique([provider, providerAccountId])
 }
 
@@ -33,18 +33,22 @@ model Session {
 }
 
 model User {
-  id            String      @id @default(cuid())
-  name          String?
-  email         String?     @unique
-  emailVerified DateTime?
-  image         String?
-  credits       Int         @default(50) // Seeds with 50 credits to try LLMs
-  customApiKey  String?     @db.Text
-  accounts      Account[]
-  sessions      Session[]
-  chats         Chat[]
-  images        UserImage[]
-  creations     Creation[]
+  id                  String              @id @default(cuid())
+  name                String?
+  email               String?             @unique
+  emailVerified       DateTime?
+  image               String?
+  credits             Int                 @default(50)
+  customApiKey        String?             @db.Text
+  accounts            Account[]
+  sessions            Session[]
+  chats               Chat[]
+  images              UserImage[]
+  creations           Creation[]
+  characters          Character[]
+  personas            Persona[]
+  lorebooks           Lorebook[]
+  creditLedgerEntries CreditLedgerEntry[]
 }
 
 model UserImage {
@@ -56,64 +60,206 @@ model UserImage {
 }
 
 model Character {
-  id           String   @id @default(cuid())
-  name         String
-  avatar       String
-  profileUrl   String?
-  description  String
-  personality  String
-  systemPrompt String
-  greeting     String
-  isCustom     Boolean  @default(true)
-  isPublic     Boolean  @default(true)
-  userId       String?
-  createdAt    DateTime @default(now())
-  chats        Chat[]
+  id                 String     @id @default(cuid())
+  name               String
+  avatar             String
+  profileUrl         String?
+  description        String     @db.Text
+  personality        String     @db.Text
+  systemPrompt       String     @db.Text
+  greeting           String     @db.Text
+  scenario           String?    @default("") @db.Text
+  exampleDialogue    String?    @default("") @db.Text
+  alternateGreetings String?    @default("[]") @db.Text
+  tags               String?    @default("[]") @db.Text
+  creatorNotes       String?    @default("") @db.Text
+  cardVersion        String?    @default("v2")
+  cardJson           String?    @db.Text
+  isCustom           Boolean    @default(true)
+  isPublic           Boolean    @default(true)
+  userId             String?
+  createdAt          DateTime   @default(now())
+  user               User?      @relation(fields: [userId], references: [id], onDelete: SetNull)
+  chats              Chat[]
+  lorebooks          Lorebook[]
 }
 
 model Chat {
-  id          String    @id @default(cuid())
-  characterId String
-  userId      String
-  createdAt   DateTime  @default(now())
-  character   Character @relation(fields: [characterId], references: [id], onDelete: Cascade)
-  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  messages    Message[]
+  id               String          @id @default(cuid())
+  characterId      String
+  userId           String
+  title            String?
+  settings         String?         @db.Text
+  scenarioOverride String?         @db.Text
+  activeBranchId   String?
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @default(now())
+  character        Character       @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  user             User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages         Message[]
+  generationRuns   GenerationRun[]
+  storySummary     StorySummary?
 }
 
 model Message {
-  id        String   @id @default(cuid())
-  chatId    String
-  role      String   // "user" or "assistant"
-  content   String
-  imageUrl  String?
-  createdAt DateTime @default(now())
-  chat      Chat     @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  id          String         @id @default(cuid())
+  chatId      String
+  branchId    String?
+  role        String
+  speaker     String?
+  content     String         @db.Text
+  imageUrl    String?        @db.Text
+  attachments String?        @db.Text
+  status      String?        @default("succeeded")
+  createdAt   DateTime       @default(now())
+  editedAt    DateTime?
+  chat        Chat           @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  swipes      MessageSwipe[]
+}
+
+model MessageSwipe {
+  id              String   @id @default(cuid())
+  messageId       String
+  index           Int
+  content         String   @db.Text
+  generationRunId String?
+  selected        Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  message         Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+}
+
+model GenerationRun {
+  id               String    @id @default(cuid())
+  chatId           String
+  targetMessageId  String?
+  action           String    @default("generate")
+  status           String    @default("queued")
+  provider         String    @default("muapi")
+  model            String
+  requestId        String?
+  promptSnapshot   String?   @db.Text
+  settingsSnapshot String?   @db.Text
+  usageJson        String?   @db.Text
+  cost             Int       @default(0)
+  error            String?   @db.Text
+  createdAt        DateTime  @default(now())
+  completedAt      DateTime?
+  chat             Chat      @relation(fields: [chatId], references: [id], onDelete: Cascade)
+}
+
+model CreditLedgerEntry {
+  id              String   @id @default(cuid())
+  userId          String
+  generationRunId String?
+  amount          Int
+  type            String
+  status          String   @default("settled")
+  idempotencyKey  String   @unique
+  description     String?  @db.Text
+  createdAt       DateTime @default(now())
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Lorebook {
+  id          String      @id @default(cuid())
+  userId      String
+  characterId String?
+  name        String
+  description String?     @db.Text
+  createdAt   DateTime    @default(now())
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  character   Character?  @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  entries     LoreEntry[]
+}
+
+model LoreEntry {
+  id            String   @id @default(cuid())
+  lorebookId    String
+  keys          String   @db.Text
+  secondaryKeys String?  @db.Text
+  content       String   @db.Text
+  order         Int      @default(100)
+  enabled       Boolean  @default(true)
+  scope         String   @default("character")
+  budgetTokens  Int?     @default(300)
+  createdAt     DateTime @default(now())
+  lorebook      Lorebook @relation(fields: [lorebookId], references: [id], onDelete: Cascade)
+}
+
+model StorySummary {
+  id                 String   @id @default(cuid())
+  chatId             String   @unique
+  summary            String   @db.Text
+  pinnedFacts        String   @default("[]") @db.Text
+  sourceMessageRange String?
+  updatedAt          DateTime @default(now())
+  chat               Chat     @relation(fields: [chatId], references: [id], onDelete: Cascade)
+}
+
+model Persona {
+  id          String   @id @default(cuid())
+  userId      String
+  name        String
+  description String   @db.Text
+  avatar      String?
+  isDefault   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model Creation {
-  id           String   @id @default(cuid())
-  prompt       String?  @db.Text
-  imageUrl     String?  @db.Text
-  aspectRatio  String?
-  resolution   String?
-  createdAt    DateTime @default(now())
-  userId       String
-  
-  requestId    String?  @unique
-  status       String   @default("processing")
-  error        String?  @db.Text
-  
-  // Extra columns to prevent database drops
-  duration     String?
-  inputImages  String?  @db.Text
-  mode         String?
-  modelId      String?
-  title        String?
-  type         String?
-  url          String?  @db.Text
-  
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id          String   @id @default(cuid())
+  prompt      String?  @db.Text
+  imageUrl    String?  @db.Text
+  aspectRatio String?
+  resolution  String?
+  createdAt   DateTime @default(now())
+  userId      String
+  requestId   String?  @unique
+  status      String   @default("processing")
+  error       String?  @db.Text
+  duration    String?
+  inputImages String?  @db.Text
+  mode        String?
+  modelId     String?
+  title       String?
+  type        String?
+  url         String?  @db.Text
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model ScheduledPost {
+  id             String    @id @default(cuid())
+  userId         String
+  accountId      Int?
+  platform       String?
+  accountName    String?
+  mediaUrl       String?   @db.Text
+  title          String?   @db.Text
+  description    String?   @db.Text
+  tags           String?   @db.Text
+  privacy        String?
+  disableComment Boolean?
+  disableDuet    Boolean?
+  disableStitch  Boolean?
+  categoryId     String?
+  madeForKids    Boolean?
+  scheduledAt    DateTime?
+  status         String?
+  requestId      String?
+  publishedUrl   String?   @db.Text
+  error          String?   @db.Text
+  createdAt      DateTime? @default(now())
+  updatedAt      DateTime? @default(now())
+}
+
+model AppInstance {
+  id         String    @id @default(cuid())
+  name       String?
+  templateId String?
+  config     String?   @db.Text
+  createdAt  DateTime? @default(now())
+  userId     String?
 }
 
 model VerificationToken {
